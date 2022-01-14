@@ -33,3 +33,8 @@ run the app like a service at start or manual, because is not possible to
 run the app from logitech software, you need the start the software with actual
 user. When all the config is ready, if you touch the G1 key, the state of the app changes
 with the new state of the microphone.
+
+To download the app compilated, download the "GMicMute v1.zip", extract where do you want.
+Make to start with the computer if dont want to start it manually every time, putting a 
+shortcut in that location: "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
+and finally make the macro for the key if you use a logitech or use the tray icon.
