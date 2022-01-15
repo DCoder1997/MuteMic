@@ -12,6 +12,7 @@ using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
 using Windows.Data.Xml.Dom;
 using Windows.UI.Notifications;
+using System.Diagnostics;
 
 namespace MuteMic
 {
@@ -58,10 +59,9 @@ namespace MuteMic
             }
 
             //Checking if the app is running
-            bool isNewInstance;
-            Mutex singleMutex = new Mutex(true, "MuteMic", out isNewInstance);
+            var processes = Process.GetProcessesByName("MuteMic");
 
-            if (!isNewInstance)
+            if (processes.Length > 1)
             {
                 //If is running only change the mic state
                 SwitchMuteUnMute();
