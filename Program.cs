@@ -13,21 +13,18 @@ using NAudio.CoreAudioApi.Interfaces;
 using Windows.Data.Xml.Dom;
 using Windows.UI.Notifications;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace MuteMic
 {
     internal class Program
     {
-        static NotifyIcon notifyIcon = new NotifyIcon();
-        static MMDevice microphone;
-        static AudioSessionControl activeSession;
-
-        static bool microphoneIsMutted;
+        public static bool microphoneIsMutted;
         static bool micDisabled;
         static bool firstTime = true;
         static bool notifications;
 
-        static bool exit;
+        public static List<uint> sessionsRegistered = new List<uint>();
 
         static void Main(string[] args)
         {
@@ -49,7 +46,7 @@ namespace MuteMic
 
             //Finding micro
             MMDeviceCollection deviceCollection = new MMDeviceEnumerator().EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active);
-            microphone = deviceCollection.First(d => d.DeviceFriendlyName.ToLowerInvariant().Contains(args[0].ToLowerInvariant()) &&
+            var microphone = deviceCollection.First(d => d.DeviceFriendlyName.ToLowerInvariant().Contains(args[0].ToLowerInvariant()) &&
                 d.AudioSessionManager.Sessions.Count >= 1);
 
             if (microphone == null)
@@ -61,16 +58,25 @@ namespace MuteMic
             //Checking if the app is running
             var processes = Process.GetProcessesByName("MuteMic");
 
-            if (processes.Length > 1)
+            if (processes.Length > 1 || args.Length == 2)
             {
                 //If is running only change the mic state
-                SwitchMuteUnMute();
+                SwitchMuteUnMute(args: args[0]);
                 return;
             }
 
+            //Tray icon
+            NotifyIcon notifyIcon = new NotifyIcon();
+
+            //Events
+            microphone.AudioSessionManager.OnSessionCreated += (ev, arg) =>
+            {
+                RefreshAll(microphone, notifyIcon);
+            };
+
             //Starting tray icon
             notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/off.ico");
-            notifyIcon.DoubleClick += (obj, ev) => { SwitchMuteUnMute(); };
+            notifyIcon.DoubleClick += (obj, ev) => { SwitchMuteUnMute(args: args[0]); };
 
             var contextMenu = new ContextMenuStrip();
             contextMenu.Items.Add("Notify - No", null, (s, e) =>
@@ -78,75 +84,94 @@ namespace MuteMic
                 notifications = !notifications;
                 contextMenu.Items[0].Text = "Notify - " + (notifications ? "Yes" : "No");
             });
-            contextMenu.Items.Add("Enable/Disable Mic", null, (s, e) => { SwitchMuteUnMute(); });
-            contextMenu.Items.Add("Exit", null, (s, e) => { exit = true; notifyIcon.Visible = false; Application.Exit(); });
+            contextMenu.Items.Add("Enable/Disable Mic", null, (s, e) =>
+            {
+                SwitchMuteUnMute();
+            });
+            contextMenu.Items.Add("Exit", null, (s, e) =>
+            {
+                notifyIcon.Visible = false;
+                Application.Exit();
+                Process.GetProcessesByName("MuteMic").ToList().ForEach(p => p.Kill());
+            });
             notifyIcon.ContextMenuStrip = contextMenu;
             notifyIcon.Visible = true;
 
-            //Starting process to recognize the changes
-            new Thread(() =>
-            {
-                while (!exit)
-                {
-                    activeSession = null;
-                    microphone.AudioSessionManager.RefreshSessions();
-
-                    var sess = microphone.AudioSessionManager.Sessions.ToList();
-
-                    if (!sess.Any(s => s.State == AudioSessionState.AudioSessionStateActive) && !micDisabled)
-                    {
-                        notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/off.ico");
-                        micDisabled = true;
-                        firstTime = true;
-                        Thread.Sleep(100);
-                        continue;
-                    }
-
-                    var activeSessions = sess.Where(s => s.State == AudioSessionState.AudioSessionStateActive);
-
-                    if (!activeSessions.Any())
-                    {
-                        notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/off.ico");
-                        micDisabled = true;
-                        Thread.Sleep(100);
-                        continue;
-                    }
-
-                    micDisabled = false;
-
-                    if (activeSessions.All(s => s.SimpleAudioVolume.Mute) && (!microphoneIsMutted || firstTime))
-                    {
-                        microphoneIsMutted = true;
-                        notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/red.ico");
-
-                        Toast();
-                    }
-                    else if (activeSessions.All(s => !s.SimpleAudioVolume.Mute) && (microphoneIsMutted || firstTime))
-                    {
-                        microphoneIsMutted = false;
-                        notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/green.ico");
-
-                        Toast();
-                    }
-
-                    firstTime = false;
-
-                    Thread.Sleep(100);
-                }
-            }).Start();
+            //First start
+            RefreshAll(microphone, notifyIcon);
 
             //Starting app
+            Application.ApplicationExit += (ev, arg) =>
+            {
+                notifyIcon.Visible = false;
+                Application.Exit();
+                Process.GetProcessesByName("MuteMic").ToList().ForEach(p => p.Kill());
+            };
             Application.Run();
         }
 
-        static void SwitchMuteUnMute()
+        static void RefreshAll(MMDevice microphone, NotifyIcon notifyIcon)
         {
-            activeSession = null;
+            microphone.AudioSessionManager.RefreshSessions();
+            var sess = microphone.AudioSessionManager.Sessions.ToList();
+            foreach (var s in sess)
+            {
+                if (!sessionsRegistered.Contains(s.GetProcessID))
+                {
+                    s.RegisterEventClient(new MicroEvents() { refreshAll = () => RefreshAll(microphone, notifyIcon), session = s, unregister = () => sessionsRegistered.Remove(s.GetProcessID) });
+                    sessionsRegistered.Add(s.GetProcessID);
+                }
+            }
+
+            if (!sess.Any(s => s.State == AudioSessionState.AudioSessionStateActive) && !micDisabled)
+            {
+                notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/off.ico");
+                micDisabled = true;
+                firstTime = true;
+                return;
+            }
+
+            var activeSessions = sess.Where(s => s.State == AudioSessionState.AudioSessionStateActive);
+
+            if (!activeSessions.Any())
+            {
+                notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/off.ico");
+                micDisabled = true;
+                return;
+            }
+
+            micDisabled = false;
+
+            if (activeSessions.All(s => s.SimpleAudioVolume.Mute) && (!microphoneIsMutted || firstTime))
+            {
+                microphoneIsMutted = true;
+                notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/red.ico");
+
+                Toast();
+            }
+            else if (activeSessions.All(s => !s.SimpleAudioVolume.Mute) && (microphoneIsMutted || firstTime))
+            {
+                microphoneIsMutted = false;
+                notifyIcon.Icon = Icon.ExtractAssociatedIcon("icons/green.ico");
+
+                Toast();
+            }
+
+            firstTime = false;
+        }
+
+        static void SwitchMuteUnMute(MMDevice microphone = null, string args = null)
+        {
+            if (microphone == null)
+                microphone = new MMDeviceEnumerator().EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)
+                    .First(d => d.DeviceFriendlyName.ToLowerInvariant().Contains(args.ToLowerInvariant()) &&
+                    d.AudioSessionManager.Sessions.Count >= 1);
+
             microphone.AudioSessionManager.RefreshSessions();
 
             var sess = microphone.AudioSessionManager.Sessions.ToList().Where(s => s.State == AudioSessionState.AudioSessionStateActive);
             var toState = !sess.FirstOrDefault()?.SimpleAudioVolume.Mute ?? false;
-            foreach(var s in sess)
+            foreach (var s in sess)
             {
                 s.SimpleAudioVolume.Volume = 0.94f;
                 s.SimpleAudioVolume.Mute = toState;
@@ -174,6 +199,50 @@ namespace MuteMic
             ToastNotification toast = new ToastNotification(toastXml);
             toast.ExpirationTime = DateTime.Now.AddSeconds(4);
             ToastNotifier.Show(toast);
+        }
+    }
+
+    class MicroEvents : IAudioSessionEventsHandler
+    {
+        public Action refreshAll;
+        public Action unregister;
+        public AudioSessionControl session;
+
+        public void OnChannelVolumeChanged(uint channelCount, IntPtr newVolumes, uint channelIndex) { }
+
+        public void OnDisplayNameChanged(string displayName) { }
+
+        public void OnGroupingParamChanged(ref Guid groupingId) { }
+
+        public void OnIconPathChanged(string iconPath) { }
+
+        public void OnSessionDisconnected(AudioSessionDisconnectReason disconnectReason)
+        {
+            unregister();
+
+            try
+            {
+                session.UnRegisterEventClient(this);
+                session.Dispose();
+            }
+            catch (COMException) { }
+
+            GC.Collect();
+            refreshAll();
+        }
+
+        public void OnStateChanged(AudioSessionState state)
+        {
+            refreshAll();
+        }
+
+        public void OnVolumeChanged(float volume, bool isMuted)
+        {
+            if (Program.microphoneIsMutted != isMuted)
+            {
+                refreshAll();
+                Program.microphoneIsMutted = isMuted;
+            }
         }
     }
 
